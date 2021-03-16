@@ -7,6 +7,7 @@ from deap import creator,base,tools
 from copy import deepcopy
 from collections import Counter
 import numpy as np
+from datetime import date
 # import tensorflow as tf 
 import operator 
 np.set_printoptions(precision=2)
@@ -273,7 +274,8 @@ class EvolutionaryAlgorithm:
             test_inc_score = ebm_prob.test_unconditional(self.valid_data)
             print("Testing inception score:.%3f"%test_inc_score)
             log_file = open("ebm_log.txt", "a")
-            line = "%s Inception score: Train:%.5f Test:%.5f,"%(str(individual), train_inc_score, test_inc_score)
+            date_time = date.today().strftime("%d/%m/%Y")
+            line = "%s %s Inception score: Train:%.5f Test:%.5f,"%(date_time, str(individual), train_inc_score, test_inc_score)
             log_file.write(line + "\n")
             log_file.close()
             return (test_inc_score,)
