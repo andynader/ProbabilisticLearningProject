@@ -15,14 +15,16 @@ import tensorflow as tf
 import numpy as np
 import operator
 from pathos.multiprocessing import ProcessPool
+
 np.set_printoptions(precision=2)
 from time import sleep
+
 
 # In[4]:
 
 
 class EvolutionaryAlgorithm:
-    def __init__(self, base_act_functions, base_operations, min_depth, max_depth, pop_size):
+    def __init__(self, base_act_functions, base_operations, min_depth, max_depth, pop_size, n_parallel_nodes):
 
         # We first initialize the pset that contains our base 
         # building blocks.
@@ -86,7 +88,7 @@ class EvolutionaryAlgorithm:
         self.hof = tools.HallOfFame(10)
 
         # Set DEAP to evolve functions in parallel
-        self.pool=ProcessPool(nodes=10)
+        self.pool = ProcessPool(nodes=n_parallel_nodes)
         self.toolbox.register("map", self.pool.map)
 
     def initialize_pset(self, base_act_functions, base_operations):
@@ -138,7 +140,7 @@ class EvolutionaryAlgorithm:
         return (string_child,)
 
     def get_ebm_fitness(self, individual):
-        sleep(2)
+        #sleep(2)
         # The individual is a string representation. 
         act = PrimitiveTree.from_string(individual, pset=self.pset)
         # Choose some very bad value in case of an error, not infinity to prevent DEAP from encountering an error
@@ -207,24 +209,10 @@ class EvolutionaryAlgorithm:
         return ['Function:{}\tFitness:{}'.format(str(mvp), mvp.fitness.values[0]) for mvp in self.hof]
 
 
-# In[5]:
-
-
-base_functions = [elu, gelu, linear, relu, selu, sigmoid, softplus, swish, tanh, atan, cos, erf, sin, sqrt]
-base_operations = [maximum, minimum, add, subtract]
-
-# In[6]:
-
-
-evo = EvolutionaryAlgorithm(base_functions, base_operations, min_depth=1, max_depth=5, pop_size=10)
-
-# In[7]:
-
 if __name__ == '__main__':
-    #pop = evo.create_generation()
-    #f=evo.get_ebm_fitness
-    #pool=ProcessPool(nodes=4)
-    #results=pool.map(f,pop)
-    #print(results)
-    evo.evolve_functions(10)
-# In[ ]:
+    base_functions = [elu, gelu, linear, relu, selu, sigmoid, softplus, swish, tanh, atan, cos, erf, sin, sqrt]
+    base_operations = [maximum, minimum, add, subtract]
+
+    evo = EvolutionaryAlgorithm(base_functions, base_operations, min_depth=1, max_depth=5, pop_size=40,
+                                n_parallel_nodes=1)
+    final_pop = evo.evolve_functions(10)
