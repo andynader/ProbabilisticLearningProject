@@ -39,6 +39,9 @@ from mpi4py import MPI
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+from pathos.multiprocessing import ProcessPool
 import horovod.tensorflow as hvd
 hvd.init()
 
@@ -123,62 +126,73 @@ print("{} batch size".format(FLAGS.batch_size))
 
 
 class EvolutionaryAlgorithm:
-    
-    def __init__(self,base_act_functions,base_operations,min_depth,max_depth,pop_size):
-        
+    def __init__(self, base_act_functions, base_operations, min_depth, max_depth, pop_size, n_parallel_nodes):
+
         # We first initialize the pset that contains our base 
         # building blocks.
-        
-        self.base_act_functions=base_act_functions
-        self.base_operations=base_operations
-        self.pset=self.initialize_pset(base_act_functions,base_operations)
-        self.pop_size=pop_size 
-        
+
+        self.base_act_functions = base_act_functions
+        self.base_operations = base_operations
+        self.pset = self.initialize_pset(base_act_functions, base_operations)
+        self.pop_size = pop_size
+        self.min_depth = min_depth
+        self.max_depth = max_depth
+
         # We specify that we are dealing with a maximization problem, and 
-        # that our individual is a PrimitiveTree. We add a reference 
-        # to the pset in "Individual", since it is used by some DEAP 
-        # GP operators when modifying an individual.
+        # we specify that our Individual is a string representation of 
+        # the activation function tree. We chose 
+        # a string representation and not the primitive tree itself because 
+        # the primitive tree contains tensorflow operations, which can't be pickled
+        # and thus can't be easily paralellized. The string representation can 
+        # be paralellized, and we can easily obtain the primitive tree from it 
+        # using DEAP's PrimitveTree.from_string function. 
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-        creator.create("Individual",PrimitiveTree,fitness=creator.FitnessMax,pset=self.pset)
-        
-        self.toolbox=base.Toolbox()
-        
-        # Our toolbox contains an "expr" function that calls genGrow with 
-        # the pset as a parameter. genGrow also takes as parameter the 
-        # minimum and maximum depth of the tree. We do not fix them
-        # here, and we leave them as variables which can be changed when 
-        # creating a population with the create_generation() function
-        
-        self.toolbox.register("expr",genGrow,pset=self.pset,min_=min_depth,max_=max_depth)
-        
-        #The "individual" function calls "expr()" on a "creator.Individual" object 
-        # and returns it. In other words, it simply creates a new Primitive tree 
-        # from our pset
-        self.toolbox.register("individual",tools.initIterate,creator.Individual,self.toolbox.expr)
-        
-        # We register the variation operators and a simple EA algorithm.
-        
-        self.toolbox.register("evaluate",self.get_ebm_fitness, ebm_prob=EBMProbML)
-        self.toolbox.register("select",tools.selRoulette)
-        self.toolbox.register("mate",cxOnePoint)
-        self.toolbox.register("mutate",mutShrink)
-        
-        # We decorate the mating and mutation operator with a limit on the maximum depth.
-        
-        self.toolbox.decorate("mate",staticLimit(key=operator.attrgetter("height"),max_value=5))
-        self.toolbox.decorate("mutate",staticLimit(key=operator.attrgetter("height"),max_value=5))
-        
-        stats_fit = tools.Statistics(lambda ind: ind.fitness.values)
-        stats_size = tools.Statistics(len)
-        self.mstats = tools.MultiStatistics(fitness=stats_fit, size=stats_size)
-        self.mstats.register("avg", np.mean)
-        self.mstats.register("std", np.std)
-        self.mstats.register("min", np.min)
-        self.mstats.register("max", np.max)
-        
+        creator.create("Individual", str, fitness=creator.FitnessMax)
+
+        self.toolbox = base.Toolbox()
+
+        # The "individual" function simply calls generate_tree_string_representation
+        # to get a string representation of a random tree, and then places it 
+        # in a "creator.Individual" container that has a fitness attribute.
+        self.toolbox.register("individual", tools.initIterate, creator.Individual,
+                              self.generate_tree_string_representation)
+
+        # We define variational operators on the PrimitiveTree representations,
+        # and we define static limits on those variational operators. The actual
+        # operations used by the evolutionary algorithm will operate on the 
+        # string representations. They will convert those string representations 
+        # to PrimitiveTree objects, apply the operators on them, and return strings.
+
+        self.toolbox.register("primitive_tree_crossover", cxOnePoint)
+        self.toolbox.register("primitive_tree_mutation", mutShrink)
+
+        # We decorate the variation operators with a limit on the maximum depth.
+
+        self.toolbox.decorate("primitive_tree_crossover", staticLimit(key=operator.attrgetter("height"), max_value=5))
+        self.toolbox.decorate("primitive_tree_mutation", staticLimit(key=operator.attrgetter("height"), max_value=5))
+
+        # We register the evaluation function, the selection method,
+        # and variational operators on the strings. 
+        self.toolbox.register("evaluate", self.get_ebm_fitness, ebm_prob=EBMProbML)
+        self.toolbox.register("select", tools.selRoulette)
+        self.toolbox.register("mate", self.crossover_strings)
+        self.toolbox.register("mutate", self.mutate_string)
+
+        # We collect statistics on the fitness values.
+        self.stats = tools.Statistics(lambda ind: ind.fitness.values)
+        self.stats.register("avg", lambda x: np.around(np.mean(x), 2))
+        self.stats.register("std", lambda x: np.around(np.std(x), 2))
+        self.stats.register("min", lambda x: np.around(np.min(x), 2))
+        self.stats.register("max", lambda x: np.around(np.max(x), 2))
+
         # We also add a Hall of fame object, and we keep the 10 best individuals in it.
-        
-        self.hof=tools.HallOfFame(10)
+
+        self.hof = tools.HallOfFame(10)
+
+        # Set DEAP to evolve functions in parallel
+        # self.pool = ProcessPool(nodes=n_parallel_nodes)
+        # self.toolbox.register("map", self.pool.map)
+
         print("Loading data...")
         path = "/home/abhi/Documents/courses/UofT/CSC2506/project/data/cifar10"
         train_dataset = Cifar10(train=True, augment=FLAGS.augment, rescale=FLAGS.rescale, path=path)
@@ -189,33 +203,86 @@ class EvolutionaryAlgorithm:
         train_data = torch.utils.data.Subset(train_dataset, train_indices)
         valid_data = torch.utils.data.Subset(train_dataset, valid_indices)
         print("Length of training data:%d"%len(train_data))
-        print("Length of validation data:%d"%len(train_data))
+        print("Length of validation data:%d"%len(valid_data))
         self.train_data = DataLoader(train_data, batch_size=FLAGS.batch_size, num_workers=FLAGS.data_workers, drop_last=True, shuffle=True)
         self.valid_data = DataLoader(valid_data, batch_size=FLAGS.batch_size, num_workers=FLAGS.data_workers, drop_last=True, shuffle=True)
         print("Done loading...")
-        
 
-    def initialize_pset(self,base_act_functions,base_operations):
-        
-        # Our desired functions are unary and we specificy this when creating the pset
-        pset=PrimitiveSet("main",1)
-        
+    def initialize_pset(self, base_act_functions, base_operations):
+
+        # Our desired functions are unary and we specify this when creating the pset
+        pset = PrimitiveSet("main", 1)
+
         # Activation functions in a neural network have 
         # arity 1.
         for func in base_act_functions:
-            pset.addPrimitive(func,1)
-            
+            pset.addPrimitive(func, 1)
+
         # The operations that we are considering, such as 
         # maximum, add or subtract, have arity 2.
         for op in base_operations:
-            pset.addPrimitive(op,2)
-            
+            pset.addPrimitive(op, 2)
+
         pset.renameArguments(ARG0="x")
-        
+
         return pset
 
-    def adjust_activation_tree(self,activation_tree):
-        copied_activation_tree = deepcopy(activation_tree)
+    def generate_tree_string_representation(self):
+        act_tree = PrimitiveTree(genGrow(self.pset, min_=self.min_depth, max_=self.max_depth))
+        str_representation = str(act_tree)
+        return str_representation
+
+    def crossover_strings(self, parent_1, parent_2):
+        # parent_1 and parent_2 are string representations, so 
+        # we convert them to primitive trees and apply
+        # a crossover operation on them.
+
+        act1 = PrimitiveTree.from_string(parent_1, pset=self.pset)
+        act2 = PrimitiveTree.from_string(parent_2, pset=self.pset)
+        child_1, child_2 = self.toolbox.primitive_tree_crossover(act1, act2)
+
+        # We return the string representations of the children
+
+        string_child_1 = creator.Individual(child_1)
+        string_child_2 = creator.Individual(child_2)
+        return string_child_1, string_child_2
+
+    def mutate_string(self, parent):
+
+        act = PrimitiveTree.from_string(parent, self.pset)
+        child = self.toolbox.primitive_tree_mutation(act)[0]
+        string_child = creator.Individual(child)
+        # DEAP expects the mutation to return a tuple 
+        # of one tree
+        return (string_child,)
+
+    # This will be replaced with a proper EBM training function later on. Make sure to take care of nan case 
+    def get_ebm_fitness(self,individual,ebm_prob):
+        tf.keras.backend.clear_session()
+        print("-------------------------------Activation function:%s-----------------------------------"%str(individual))
+        # Choose some very bad value in case of an error, not infinity to prevent DEAP from encountering an error
+        primitive_tree=PrimitiveTree.from_string(individual,self.pset)
+        act_fun=compile(primitive_tree,self.pset)
+        ebm_prob = EBMProbML(act_fun)
+        # FLAGS.cclass = True
+        train_inc_score = ebm_prob.train_unconditional(self.train_data)
+        print("Training Inception score:.%3f"%train_inc_score)
+        if train_inc_score > 0:
+            test_inc_score = ebm_prob.test_unconditional(self.valid_data)
+            print("Testing inception score:.%3f"%test_inc_score)
+            log_file = open("ebm_log.txt", "a")
+            date_time = date.today().strftime("%d/%m/%Y")
+            line = "%s %s Inception score: Train:%.5f Test:%.5f,"%(date_time, str(individual), train_inc_score, test_inc_score)
+            log_file.write(line + "\n")
+            log_file.close()
+            return (test_inc_score,)
+        else:
+            print("Training diverged!")
+            return(-1.,)
+
+    def adjust_activation_tree(self, activation_tree_str):
+        copied_str = deepcopy(activation_tree_str)
+        copied_activation_tree = PrimitiveTree.from_string(copied_str, self.pset)
         bias_pset = PrimitiveSet(name='bias_set', arity=1)
         for func in self.base_act_functions:
             bias_pset.addTerminal(terminal=func, name='terminal_' + func.__name__)
@@ -238,8 +305,8 @@ class EvolutionaryAlgorithm:
                     done = True
             for i in range(starting_index, len(copied_activation_tree)):
                 if i < len(copied_activation_tree) - 1:
-                    condition = copied_activation_tree[i].name == 'ARG0' and \
-                                (copied_activation_tree[i + 1].name == 'ARG0' or two_literals)
+                    condition = copied_activation_tree[i].name == 'ARG0' and (
+                            copied_activation_tree[i + 1].name == 'ARG0' or two_literals)
                 else:
                     condition = copied_activation_tree[i].name == 'ARG0' and two_literals
                 if condition:
@@ -253,43 +320,22 @@ class EvolutionaryAlgorithm:
                     else:
                         starting_index = i + 1
                     break
-        return copied_activation_tree
-    
+        # return the string representation of the new tree
+        return creator.Individual(copied_activation_tree)
+
     def create_generation(self):
-        generation=[self.toolbox.individual() for i in range(self.pop_size)]
-        generation=[self.adjust_activation_tree(x) for x in generation]
+        generation = [self.toolbox.individual() for i in range(self.pop_size)]
+        generation = [self.adjust_activation_tree(x) for x in generation]
         return generation
-    
-    # This will be replaced with a proper EBM training function later on. Make sure to take care of nan case 
-    def get_ebm_fitness(self,individual,ebm_prob):
-        tf.keras.backend.clear_session()
-        print("-------------------------------Activation function:%s-----------------------------------"%str(individual))
-        # Choose some very bad value in case of an error, not infinity to prevent DEAP from encountering an error
-        act_fun=compile(individual,self.pset)
-        ebm_prob = EBMProbML(act_fun)
-        # FLAGS.cclass = True
-        train_inc_score = ebm_prob.train_unconditional(self.train_data)
-        print("Training Inception score:.%3f"%train_inc_score)
-        if train_inc_score > 0:
-            test_inc_score = ebm_prob.test_unconditional(self.valid_data)
-            print("Testing inception score:.%3f"%test_inc_score)
-            log_file = open("ebm_log.txt", "a")
-            date_time = date.today().strftime("%d/%m/%Y")
-            line = "%s %s Inception score: Train:%.5f Test:%.5f,"%(date_time, str(individual), train_inc_score, test_inc_score)
-            log_file.write(line + "\n")
-            log_file.close()
-            return (test_inc_score,)
-        else:
-            print("Training diverged!")
-            return(-1.,)
-    
-    def evolve_functions(self,num_generations):
-        pop=self.create_generation()
-        pop,log=eaSimple(pop,self.toolbox,ngen=num_generations,cxpb=0.8,mutpb=0.02,stats=self.mstats,halloffame=self.hof,verbose=True)
+
+    def evolve_functions(self, num_generations):
+        pop = self.create_generation()
+        pop, log = eaSimple(pop, self.toolbox, ngen=num_generations, cxpb=0.8, mutpb=0.02, stats=self.stats,
+                            halloffame=self.hof, verbose=True)
         return pop
-    
+
     def get_hof_inds(self):
-        return ['Function:{}\tFitness:{}'.format(str(mvp),mvp.fitness.values[0]) for mvp in self.hof]
+        return ['Function:{}\tFitness:{}'.format(str(mvp), mvp.fitness.values[0]) for mvp in self.hof]
 
 def compress_x_mod(x_mod):
     x_mod = (255 * np.clip(x_mod, 0, FLAGS.rescale) / FLAGS.rescale).astype(np.uint8)
@@ -984,9 +1030,9 @@ def setup(act_fun):
         target_vars['train_op'] = train_op
 
     config = tf.ConfigProto()
-
-    if hvd.size() > 1:
-        config.gpu_options.visible_device_list = str(hvd.local_rank())
+    config.gpu_options.allow_growth = True
+    # if hvd.size() > 1:
+    #     config.gpu_options.visible_device_list = str(hvd.local_rank())
 
     sess = tf.Session(config=config)
     saver = loader = tf.train.Saver(max_to_keep=30, keep_checkpoint_every_n_hours=6)
@@ -1059,8 +1105,18 @@ if __name__ == "__main__":
     base_functions=[elu,gelu,linear,relu,selu,sigmoid,softplus,swish,tanh,atan,cos,erf,sin,sqrt]
     base_operations=[maximum,minimum,add,subtract]
 
-    evo=EvolutionaryAlgorithm(base_functions,base_operations,min_depth=1,max_depth=3,pop_size=10)
-    evo.evolve_functions(num_generations=5)
+    evo=EvolutionaryAlgorithm(base_functions,base_operations,min_depth=1,max_depth=3,pop_size=2, n_parallel_nodes=4)
+    final_pop = evo.evolve_functions(num_generations=2)
+
+    # evo=EvolutionaryAlgorithm(base_functions,base_operations,min_depth=1,max_depth=5,pop_size=30, n_parallel_nodes=4)
+    # final_pop = evo.evolve_functions(num_generations=30)
+    log=open("hof.txt", 'w')
+    for act in evo.hof:
+        line = "{} fitness:\t{}\n".format(act, act.fitness.values[0])
+        log.write(line)
+    log.close()
+
+
 
     # test_dataset = Cifar10(train=False, rescale=FLAGS.rescale, path=path)
     # test_dataset_1 = torch.utils.data.Subset(test_dataset, list(range(0, 500, 2)))
