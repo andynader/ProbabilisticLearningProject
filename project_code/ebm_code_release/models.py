@@ -68,9 +68,9 @@ class MnistNet(object):
                 else:
                     weights[k] = tf.stop_gradient(v)
 
-        if FLAGS.cclass:
-            label_d = tf.reshape(label, shape=(tf.shape(label)[0], 1, 1, self.label_size))
-            inp = conv_cond_concat(inp, label_d)
+        # if FLAGS.cclass:
+        #     label_d = tf.reshape(label, shape=(tf.shape(label)[0], 1, 1, self.label_size))
+        #     inp = conv_cond_concat(inp, label_d)
 
         h1 = smart_conv_block(inp, weights, reuse, 'c1_pre', use_stride=False, activation=self.act)
         h2 = smart_conv_block(h1, weights, reuse, 'c1', use_stride=True, downsample=True, label=label, extra_bias=False, activation=self.act)

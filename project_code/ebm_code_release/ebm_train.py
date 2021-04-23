@@ -348,7 +348,7 @@ def decompress_x_mod(x_mod):
     return x_mod
 
 
-def make_image(tensor):
+def make_image(tensor, tag):
     """Convert an numpy representation image to Image protobuf"""
     from PIL import Image
     if len(tensor.shape) == 4:
@@ -360,6 +360,7 @@ def make_image(tensor):
         channel = 1
     tensor = tensor.astype(np.uint8)
     image = Image.fromarray(tensor)
+    image.save(tag + ".png")
     import io
     output = io.BytesIO()
     image.save(output, format='PNG')
@@ -372,7 +373,7 @@ def make_image(tensor):
 
 
 def log_image(im, logger, tag, step=0):
-    im = make_image(im)
+    im = make_image(im, tag)
 
     summary = [tf.Summary.Value(tag=tag, image=im)]
     summary = tf.Summary(value=summary)
@@ -700,6 +701,7 @@ def test(target_vars, saver, sess, logger, dataloader):
         size = shape[1]
         new_im[:, :size] = im
         new_im[:, size:2 * size] = t_im
+        new_im[:, 2 * size:] = actual_im_i
 
         if FLAGS.cclass:
             label_i = np.where(label_i == 1)[0][0]
@@ -763,7 +765,7 @@ def setup(act_fun):
         print("------------------Using ResNet32 model------------")
         model = ResNet32(
             num_channels=channel_num,
-            num_filters=128,
+            num_filters=64,
             act_fun=act_fun)
     elif FLAGS.large_model:
         print("------------------Using ResNet32Large model------------")
@@ -1071,6 +1073,7 @@ class EBMProbML:
             self.logger = TensorBoardOutputFormat(self.logdir)
         else:
             self.logger = None
+        # self.act_fun = tf.nn.relu;
         self.act_fun = act_fun
         self.target_vars, self.saver, self.sess, self.resume_itr = setup(self.act_fun)
         
